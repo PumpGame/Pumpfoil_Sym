@@ -7,8 +7,102 @@ import os
 
 import os, sys, subprocess
 
+import pygame, sys, math, struct, os, json, random
+
+# Niski latency i 16-bit stereo
+pygame.mixer.pre_init(44100, -16, 2, 512)
+
+# na górze pliku (globalnie):
+prev_pump_pressed = False
+pump_cd = 0
+
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SHAPES_PATH = os.path.join(BASE_DIR, "assets", "shapes_pumpfoil.json")
+
+SAMPLE_RATE = 44100
+
+def _envelope(i, n, a=0.01, d=0.15):
+    # prosta ADS (A i D, bez S/R) – szybki atak i wygaszanie
+    t = i / max(1, n-1)
+    att = min(1.0, t / max(1e-6, a))
+    dec = max(0.0, 1.0 - max(0.0, (t - a)) / max(1e-6, d))
+    return max(0.0, min(1.0, att * dec))
+
+def _tone(freq=440.0, ms=120, volume=0.4, wave='sine', sweep=0.0, noise=False):
+    """Zwraca pygame.mixer.Sound z wygenerowanym dźwiękiem (stereo, 16-bit)."""
+    n = int(SAMPLE_RATE * (ms/1000.0))
+    frames = bytearray()
+    phase = 0.0
+    ph_inc = (2*math.pi*freq) / SAMPLE_RATE
+    for i in range(n):
+        # prosty sweep (dodatnia = w górę, ujemna = w dół)
+        if sweep != 0.0:
+            f = freq * (1.0 + sweep * (i/n))
+            ph_inc = (2*math.pi*max(10.0, f)) / SAMPLE_RATE
+
+        if noise:
+            s = (random.random()*2.0 - 1.0)  # biały szum
+        else:
+            if wave == 'sine':
+                s = math.sin(phase)
+            elif wave == 'square':
+                s = 1.0 if math.sin(phase) >= 0 else -1.0
+            elif wave == 'tri':
+                # trójkąt: przeskalowany sawtooth -> tri
+                x = (phase / math.pi) % 2.0
+                s = 2.0*(1.0 - abs(x-1.0)) - 1.0
+            else:
+                s = math.sin(phase)
+        phase += ph_inc
+
+        env = _envelope(i, n, a=0.01, d=0.2)
+        val = int(32767 * volume * env * s)
+        # stereo: L, R takie same
+        frames += struct.pack('<hh', val, val)
+
+    return pygame.mixer.Sound(buffer=bytes(frames))
+
+# „Bank” dźwięków generowanych
+SND = {}
+def load_builtin_sounds():
+    global SND
+    SND = {
+        # klik menu
+        'click':  _tone(1000, ms=70,  volume=0.35, wave='square'),
+        # start gry
+        'start':  _tone(600,  ms=140, volume=0.35, wave='sine', sweep=+0.6),
+        # pompka
+        'pump':   _tone(160,  ms=120, volume=0.55, wave='sine', sweep=-0.5),
+        # breach – wyjście skrzydła nad wodę
+        'breach': _tone(700,  ms=160, volume=0.35, wave='sine', sweep=+1.2),
+        # splash – deska w wodzie
+        'splash': _tone(0,     ms=150, volume=0.5,  noise=True),
+        # game over
+        'go1':    _tone(500,  ms=130, volume=0.4,  wave='sine', sweep=-0.3),
+        'go2':    _tone(300,  ms=180, volume=0.4,  wave='sine', sweep=-0.2),
+        # --- Fale: dłuższy szum, zapętlany ---
+        'waves': _waves_simple(ms=8000, base_vol=0.01),
+    }
+
+def _waves_simple(ms=8000, base_vol=0.25):
+    """
+    Prosty szum fal:
+      - biały szum,
+      - modulacja głośności sinusoidą (0.2 Hz ≈ 5s cykl),
+      - długość 8s = pętla.
+    """
+    n = int(SAMPLE_RATE * (ms/1000.0))
+    frames = bytearray()
+    freq = 0.2  # częstotliwość modulacji (Hz) – wolne fale
+    for i in range(n):
+        noise = random.random()*2.0 - 1.0
+        lfo = 0.7 + 0.3*math.sin(2*math.pi*freq * (i/SAMPLE_RATE))
+        val = int(32767 * base_vol * noise * lfo)
+        frames += struct.pack('<hh', val, val)
+    return pygame.mixer.Sound(buffer=bytes(frames))
+
+
 
 def run_editor():
     # UPEWNIJ SIĘ, ŻE NAZWA PLIKU SIĘ ZGADZA:
@@ -33,6 +127,8 @@ def run_editor():
 # ---------------------------------------------
 
 pygame.init()
+load_builtin_sounds()
+
 
 # -- USTAWIENIA OKNA
 WIDTH, HEIGHT = 800, 450
@@ -198,6 +294,15 @@ def update_physics():
     for sw in seaweed_list:
         sw.x -= 2
     seaweed_list[:] = [sw for sw in seaweed_list if sw.right > 0]
+
+    global prev_pump_pressed, pump_cd
+    is_pump = keys[pygame.K_SPACE] or keys[pygame.K_UP]
+    if pump_cd > 0: pump_cd -= 1
+    if is_pump and not prev_pump_pressed and pump_cd == 0:
+        snd = SND.get('pump')
+        if snd: snd.play()
+        pump_cd = 6  # krótki cooldown
+    prev_pump_pressed = is_pump
 
 
 def check_fail():
@@ -455,53 +560,77 @@ def draw_hud():
 def menu_loop():
     while True:
         for event in pygame.event.get():
+            # --- wyjście okna ---
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
-            if event.type == pygame.KEYDOWN:
+
+            # --- klawiatura ---
+            elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     pygame.quit(); sys.exit()
-                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+
+                elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    s_start = SND.get('start') if 'SND' in globals() else None
+                    if s_start: s_start.play()
                     return
-                if event.key == pygame.K_F2:
+
+                elif event.key == pygame.K_F2:
+                    s_click = SND.get('click') if 'SND' in globals() else None
+                    if s_click: s_click.play()
                     run_editor()
-                if event.type == pygame.KEYDOWN and event.key == pygame.K_F5:
+
+                elif event.key == pygame.K_F5:
                     reload_skin()
 
-            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                pos = event.pos
-                if btn_start.collidepoint(pos):
+            # --- mysz ---
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                # Bezpieczne pobranie dźwięków (mogą nie istnieć)
+                s_click = SND.get('click') if 'SND' in globals() else None
+                s_start = SND.get('start') if 'SND' in globals() else None
+
+                if btn_start.collidepoint(event.pos):
+                    if s_start: s_start.play()
                     return
-                elif btn_editor.collidepoint(pos):
-                    print("[DBG] Klik: Edytor")
+
+                elif 'btn_editor' in globals() and btn_editor.collidepoint(event.pos):
+                    if s_click: s_click.play()
                     run_editor()
-                    continue   # nie przepadaj dalej
-                elif btn_quit.collidepoint(pos):
+
+                elif btn_quit.collidepoint(event.pos):
+                    if s_click: s_click.play()
                     pygame.quit(); sys.exit()
 
-            
-
+        # --- rysowanie menu ---
         draw_scene_base()
         title = font_big.render("Pumpfoil NES", True, WHITE)
-        subtitle = font_small.render("SPACE/↑ aby pompować", True, WHITE)
+        subtitle = font_small.render("SPACE/↑ – Start  |  F2 – Edytor  |  F5 – Przeładuj skina", True, WHITE)
         screen.blit(title, (WIDTH//2 - title.get_width()//2, 90))
         screen.blit(subtitle, (WIDTH//2 - subtitle.get_width()//2, 130))
 
         mx, my = pygame.mouse.get_pos()
-        draw_button(btn_start, "Start", btn_start.collidepoint((mx, my)))
-        draw_button(btn_quit,  "Wyjście", btn_quit.collidepoint((mx, my)), color=RED)
-        draw_button(btn_editor, "Skin Editor (F2)", btn_editor.collidepoint((mx, my)), color=GRAY)
-
+        draw_button(btn_start,  "Start",               btn_start.collidepoint((mx, my)))
+        draw_button(btn_quit,   "Wyjście",             btn_quit.collidepoint((mx, my)), color=RED)
+        if 'btn_editor' in globals():
+            draw_button(btn_editor, "Edytor skórek (F2)", btn_editor.collidepoint((mx, my)), color=GRAY)
+            bottom_y = max(btn_quit.bottom, btn_editor.bottom)
+        else:
+            bottom_y = btn_quit.bottom
 
         hint = font_small.render("ENTER/SPACE – Start  |  ESC – Wyjście", True, WHITE)
-        screen.blit(hint, (WIDTH//2 - hint.get_width()//2, btn_quit.bottom + 16))
+        screen.blit(hint, (WIDTH//2 - hint.get_width()//2, bottom_y + 16))
 
         pygame.display.flip()
         clock.tick(60)
 
 
+
 def game_loop():
     global high_score
     reset_game()
+
+    amb = SND.get('waves')  # jeśli generujesz/masz taki SFX
+    if amb: amb.play(loops=-1)
+
     while True:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
