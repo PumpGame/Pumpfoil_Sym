@@ -99,7 +99,7 @@ def spawn_seaweed():
     seaweed_list.append(pygame.Rect(x, water_line - h, 12, h))
 
 # -- PRZYCISKI
-BTN_W, BTN_H = 200, 44
+BTN_W, BTN_H = 320, 52
 
 def btn_rect(center_x, y):
     return pygame.Rect(center_x - BTN_W//2, y, BTN_W, BTN_H)
@@ -124,8 +124,15 @@ def draw_button(rect: pygame.Rect, label: str, active: bool=False, color=GREEN):
     outline = (255, 255, 255) if active else (220, 220, 220)
     pygame.draw.rect(screen, color, rect, border_radius=10)
     pygame.draw.rect(screen, outline, rect, width=3, border_radius=10)
-    txt = font_medium.render(label, True, WHITE)
-    screen.blit(txt, (rect.centerx - txt.get_width()//2, rect.centery - txt.get_height()//2))
+
+    # auto-dobór czcionki: medium, a jeśli nie mieści się - small
+    f = font_medium
+    if f.size(label)[0] > rect.width - 16:
+        f = font_small
+
+    txt = f.render(label, True, WHITE)
+    screen.blit(txt, txt.get_rect(center=rect.center))
+
 
 
 def reset_game():
